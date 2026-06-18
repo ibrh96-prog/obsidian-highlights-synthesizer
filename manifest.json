@@ -1,0 +1,9 @@
+{
+  "id": "highlight-inbox-synthesizer",
+  "name": "Highlight Inbox Synthesizer",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Turn your scattered highlights into synthesized reading memory.",
+  "author": "ibrh96-prog",
+  "isDesktopOnly": false
+}

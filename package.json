@@ -1,0 +1,25 @@
+{
+  "name": "highlight-inbox-synthesizer",
+  "version": "0.1.0",
+  "description": "Turn your scattered highlights into synthesized reading memory.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && git add manifest.json versions.json",
+    "mint": "node tools/mint-license.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ibrh96-prog/obsidian-highlights-synthesizer.git"
+  },
+  "keywords": [],
+  "author": "ibrh96-prog",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "typescript": "^5.0.0"
+  }
+}
