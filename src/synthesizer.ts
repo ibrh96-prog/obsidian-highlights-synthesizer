@@ -21,6 +21,62 @@ export interface SyncResult {
 	themesResynthesized: number;
 }
 
+// --- Shape the LLM is asked to return (validated before use) ---
+
+interface RawExtraction {
+	summary: string;
+	keyClaims: string[];
+	topics: string[];
+	language?: string;
+}
+
+/**
+ * Why a parse attempt yielded nothing usable. "invalid-json" and "empty"
+ * (syntactically valid JSON but no real value in it) have different causes in
+ * the field — weak JSON mode vs. thin highlights the model couldn't summarize —
+ * so they are reported separately. Generic over the parsed payload so
+ * extraction and theme synthesis share the same defensive shape.
+ */
+type ParseOutcome<T> =
+	| { kind: "ok"; value: T }
+	| { kind: "invalid-json" }
+	| { kind: "empty" };
+
+const EXTRACTION_SYSTEM_PROMPT = [
+	"You are a highlight-inbox extraction engine. You are given a set of curated",
+	"highlights a reader saved from one source — a book, article, podcast, tweet,",
+	"or video. Read the highlights and extract what they are collectively about,",
+	"the key claims across them, their topics, and language.",
+	"",
+	"Return ONLY a valid JSON object — no markdown code fences, no commentary,",
+	"no prose before or after. The object must match exactly this shape:",
+	"{",
+	'  "summary": string,',
+	'  "keyClaims": string[],',
+	'  "topics": string[],',
+	'  "language": string',
+	"}",
+	"",
+	"Rules:",
+	'- "summary" is 2-3 sentences giving a high-level overview of what these',
+	"  highlights are collectively about, written in the source's own language.",
+	'- "keyClaims" are 2-4 specific claims, findings, or arguments expressed',
+	"  across the highlights — each one sentence, in the source's own language.",
+	"  They must add concrete detail NOT already stated in the summary; do not",
+	"  restate the summary. If the highlights make no specific claims, use an",
+	"  empty array.",
+	'- "topics" are 2-5 short lowercase category labels (1-3 words each).',
+	"  Use BROAD, reusable categories that other sources would also share,",
+	"  NOT specific names, products, or events. For example use",
+	'  "artificial intelligence" not "claude fable 5"; "climate policy" not',
+	'  "the 2026 paris summit"; "personal finance" not "my fidelity account".',
+	"  Prefer the most standard, conventional name for each category.",
+	'- "language" is the ISO 639-1 code of the source\'s language,',
+	'  e.g. "en", "tr", "de".',
+	'- If a field is unknown, use an empty array or "" as appropriate.',
+	"- Do NOT invent content that is not in the highlights.",
+].join("\n");
+
 /**
  * Owns the synthesis cache and answers cross-source queries.
  *
@@ -32,9 +88,8 @@ export interface SyncResult {
  * for "today" — the caller passes dates in — so the engine stays deterministic
  * and testable.
  *
- * Phase 2 skeleton: the cache mechanics (incremental skip-if-unchanged and the
- * djb2 signature) are real; the actual extraction, theme synthesis, and report
- * rendering are stubbed and arrive in Phase 3.
+ * Phase 3 step 1: per-source extraction is live. Theme synthesis and report
+ * rendering are still stubbed and arrive in steps 2 and 3.
  */
 export class SynthesisEngine {
 	private readonly llm: LLMAdapter;
@@ -224,19 +279,191 @@ export class SynthesisEngine {
 	}
 
 	/**
-	 * Extract one source. Phase 2 stub — no LLM call yet, always returns null so
-	 * nothing is written to the cache. Phase 3 adds the extraction prompt and
-	 * defensive JSON parsing.
+	 * Ask the LLM to extract one source from its prepared highlights. Parses the
+	 * response defensively and retries once on a parse failure. Returns null (and
+	 * warns) if both attempts fail — or if the request itself throws
+	 * (network/auth) — so the caller can count the failure without aborting the
+	 * whole sync.
 	 */
 	private async extractSource(
 		source: HighlightSource,
 		body: string
 	): Promise<SourceExtraction | null> {
-		// TODO (Phase 3): build the extraction prompt, call this.llm.complete,
-		// and parse the response into a SourceExtraction.
-		void source;
-		void body;
-		return null;
+		const userPrompt = this.buildUserPrompt(source, body);
+
+		try {
+			const first = await this.llm.complete(
+				EXTRACTION_SYSTEM_PROMPT,
+				userPrompt
+			);
+			const firstOutcome = this.parseExtraction(first);
+			if (firstOutcome.kind === "ok") {
+				return this.toSourceExtraction(source, firstOutcome.value);
+			}
+
+			const complaint =
+				firstOutcome.kind === "empty"
+					? "Your previous output was valid JSON but contained no summary. " +
+						"Return the JSON object with a non-empty summary."
+					: "Your previous output was not valid JSON. Return ONLY the JSON object.";
+			const retryPrompt = `${userPrompt}\n\n${complaint}`;
+			const second = await this.llm.complete(
+				EXTRACTION_SYSTEM_PROMPT,
+				retryPrompt
+			);
+			const secondOutcome = this.parseExtraction(second);
+			if (secondOutcome.kind === "ok") {
+				return this.toSourceExtraction(source, secondOutcome.value);
+			}
+
+			// Response body text only — never API keys or headers.
+			const reason =
+				secondOutcome.kind === "empty"
+					? "valid JSON but empty extraction"
+					: "invalid JSON";
+			console.warn(
+				`[Highlight Inbox Synthesizer] Extraction failed (${reason}) for source: ${source.path}. ` +
+					`Raw response (first 300 chars): ${second.slice(0, 300)}`
+			);
+			return null;
+		} catch (error) {
+			console.warn(
+				`[Highlight Inbox Synthesizer] Extraction request failed for source: ${source.path}`,
+				error
+			);
+			return null;
+		}
+	}
+
+	/** Assemble the user prompt from the source metadata and its highlights. */
+	private buildUserPrompt(source: HighlightSource, body: string): string {
+		const lines = [`Title: ${source.title}`];
+		if (source.url) {
+			lines.push(`URL: ${source.url}`);
+		}
+		if (source.author) {
+			lines.push(`Author: ${source.author}`);
+		}
+		if (source.category) {
+			lines.push(`Category: ${source.category}`);
+		}
+		lines.push("", "Highlights:", body);
+		return lines.join("\n");
+	}
+
+	/** Assemble the cached extraction from a validated LLM result. */
+	private toSourceExtraction(
+		source: HighlightSource,
+		raw: RawExtraction
+	): SourceExtraction {
+		const extraction: SourceExtraction = {
+			id: this.hash(source.path),
+			summary: raw.summary,
+			keyClaims: raw.keyClaims,
+			topics: raw.topics,
+		};
+		if (raw.language !== undefined) {
+			extraction.language = raw.language;
+		}
+		return extraction;
+	}
+
+	private parseExtraction(raw: string): ParseOutcome<RawExtraction> {
+		const value = this.extractJsonValue(raw);
+		if (value === undefined) {
+			return { kind: "invalid-json" };
+		}
+		const extraction = this.coerceExtraction(value);
+		if (extraction === null) {
+			return { kind: "empty" };
+		}
+		return { kind: "ok", value: extraction };
+	}
+
+	/**
+	 * Best-effort JSON recovery from a raw model response. Strips code fences,
+	 * parses as-is, and if that fails retries on the substring from the first "{"
+	 * to the last "}" (weak models often wrap JSON in prose like "Here is the
+	 * JSON: {…}"). Returns undefined when nothing parses — a safe sentinel, since
+	 * JSON.parse never yields it.
+	 */
+	private extractJsonValue(raw: string): unknown {
+		const cleaned = this.stripFences(raw);
+
+		const direct = this.tryParseJson(cleaned);
+		if (direct !== undefined) {
+			return direct;
+		}
+
+		const start = cleaned.indexOf("{");
+		const end = cleaned.lastIndexOf("}");
+		if (start !== -1 && end > start) {
+			return this.tryParseJson(cleaned.slice(start, end + 1));
+		}
+		return undefined;
+	}
+
+	/** JSON.parse that returns undefined instead of throwing. (JSON.parse
+	 * itself can never produce undefined, so it's a safe failure sentinel.) */
+	private tryParseJson(text: string): unknown {
+		try {
+			return JSON.parse(text);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Remove an accidental ```json … ``` wrapper before parsing. */
+	private stripFences(raw: string): string {
+		let text = raw.trim();
+		if (text.startsWith("```")) {
+			text = text
+				.replace(/^```[a-zA-Z]*\s*/, "")
+				.replace(/\s*```$/, "");
+		}
+		return text.trim();
+	}
+
+	/** Validate/normalize an arbitrary parsed value into a RawExtraction. */
+	private coerceExtraction(value: unknown): RawExtraction | null {
+		if (typeof value !== "object" || value === null) {
+			return null;
+		}
+		const obj = value as Record<string, unknown>;
+
+		const summary =
+			typeof obj["summary"] === "string" ? obj["summary"].trim() : "";
+		if (summary === "") {
+			return null;
+		}
+
+		const extraction: RawExtraction = {
+			summary,
+			keyClaims: this.toStringArray(obj["keyClaims"]),
+			topics: this.toStringArray(obj["topics"]).map((t) => t.toLowerCase()),
+		};
+
+		// Accept "en" but also sloppy variants like "en-US"; keep the 639-1 part.
+		const language =
+			typeof obj["language"] === "string"
+				? obj["language"].trim().toLowerCase()
+				: "";
+		const languageMatch = language.match(/^[a-z]{2}/);
+		if (languageMatch) {
+			extraction.language = languageMatch[0];
+		}
+
+		return extraction;
+	}
+
+	private toStringArray(value: unknown): string[] {
+		if (!Array.isArray(value)) {
+			return [];
+		}
+		return value
+			.filter((v): v is string => typeof v === "string")
+			.map((v) => v.trim())
+			.filter((v) => v !== "");
 	}
 
 	/**

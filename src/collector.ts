@@ -145,7 +145,15 @@ export class HighlightCollector {
 		}
 
 		// Fallback: no recognizable markers — treat the whole body as one block.
-		return [{ text: body }];
+		// Still strip per-line markers (so any stray "[!QUOTE]"/"^block-id" can
+		// never leak through), but keep paragraph breaks intact for plain prose.
+		const whole = body
+			.split("\n")
+			.map((line) => this.stripLineMarkers(line))
+			.join("\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim();
+		return whole === "" ? [] : [{ text: whole }];
 	}
 
 	/** Drop a leading YAML frontmatter block, if present. */
@@ -213,8 +221,9 @@ export class HighlightCollector {
 		for (const line of body.split("\n")) {
 			if (/^\s*>\s*\[!quote\]/i.test(line)) {
 				flush();
-				// Keep any text on the marker line after the "[!QUOTE]" tag.
-				current = [line.replace(/^\s*>\s*\[!quote\][-+]?\s*/i, "")];
+				// Keep the marker line; cleanHighlightText strips the "[!QUOTE]"
+				// tag itself and preserves any quoted text on the same line.
+				current = [line];
 			} else if (current !== null && /^\s*>/.test(line)) {
 				current.push(line);
 			} else {
@@ -227,47 +236,83 @@ export class HighlightCollector {
 	}
 
 	/**
-	 * Split on plain bullets ("- ", "* ", "+ "). Each top-level bullet is a
-	 * highlight; an indented "Note: ..." bullet attaches to the previous one.
-	 * Returns [] when the body has no bullets.
+	 * Split on plain bullets ("- ", "* ", "+ "). Each bullet plus its following
+	 * wrapped/indented continuation lines forms ONE highlight, ending at the next
+	 * bullet, a blank line, or a callout marker. An indented "Note: ..." bullet
+	 * attaches to the previous highlight instead. Returns [] when the body has no
+	 * bullets.
 	 */
 	private fromBullets(body: string): Highlight[] {
 		const bulletRe = /^(\s*)[-*+]\s+(.*)$/;
 		const highlights: Highlight[] = [];
+		let current: { indent: number; lines: string[] } | null = null;
+
+		const flush = () => {
+			if (current === null) {
+				return;
+			}
+			const text = this.cleanHighlightText(current.lines.join("\n"));
+			// An indented "Note: ..." bullet annotates the previous highlight
+			// rather than standing as its own. The "s" flag lets a note wrap.
+			const noteMatch = text.match(/^note:\s*([\s\S]*)$/i);
+			if (current.indent > 0 && noteMatch && highlights.length > 0) {
+				highlights[highlights.length - 1].note = noteMatch[1].trim();
+			} else if (text !== "") {
+				highlights.push({ text });
+			}
+			current = null;
+		};
 
 		for (const line of body.split("\n")) {
 			const match = line.match(bulletRe);
-			if (!match) {
-				continue;
+			if (match) {
+				// A new bullet starts a new highlight.
+				flush();
+				current = { indent: match[1].length, lines: [match[2]] };
+			} else if (
+				current !== null &&
+				line.trim() !== "" &&
+				!/^\s*>/.test(line)
+			) {
+				// A non-bullet, non-blank, non-callout line continues this bullet.
+				current.lines.push(line);
+			} else {
+				// Blank line or callout marker ends the current highlight.
+				flush();
 			}
-			const indent = match[1].length;
-			const content = match[2].trim();
-			if (content === "") {
-				continue;
-			}
-
-			const noteMatch = content.match(/^note:\s*(.*)$/i);
-			if (indent > 0 && noteMatch && highlights.length > 0) {
-				highlights[highlights.length - 1].note = noteMatch[1].trim();
-				continue;
-			}
-
-			highlights.push({ text: this.cleanHighlightText(content) });
 		}
+		flush();
 
 		return highlights;
 	}
 
-	/** Strip leading bullet/quote markers from each line and collapse blanks. */
+	/**
+	 * Strip every leading/trailing markdown marker from ONE line. Removes, in
+	 * order: the "> " blockquote/callout quote prefix, a callout-type marker
+	 * ("[!QUOTE]", "[!quote]", any "[!TYPE]" with optional +/- fold), a bullet
+	 * marker, and a trailing "^block-id" (e.g. "^rw-fm003"). The callout-marker
+	 * and block-id strips run independent of the quote prefix, so a bare
+	 * "[!QUOTE]" line (no ">") and a trailing block id are both removed whether or
+	 * not a ">" was present. A line that was only a marker collapses to "".
+	 */
+	private stripLineMarkers(line: string): string {
+		return line
+			.replace(/^\s*>\s?/, "")
+			.replace(/^\s*\[![^\]]*\][-+]?\s*/, "")
+			.replace(/^\s*[-*+]\s+/, "")
+			.replace(/\s*\^[A-Za-z0-9][\w-]*\s*$/, "")
+			.trim();
+	}
+
+	/**
+	 * Clean a highlight made of one or more lines: strip per-line markers and drop
+	 * lines that were only markers (so "> [!QUOTE]" header lines never leak into
+	 * the text), then collapse to non-empty lines.
+	 */
 	private cleanHighlightText(raw: string): string {
 		return raw
 			.split("\n")
-			.map((line) =>
-				line
-					.replace(/^\s*>\s?/, "")
-					.replace(/^\s*[-*+]\s+/, "")
-					.trim()
-			)
+			.map((line) => this.stripLineMarkers(line))
 			.filter((line) => line !== "")
 			.join("\n")
 			.trim();
