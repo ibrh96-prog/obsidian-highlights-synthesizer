@@ -49,7 +49,7 @@ It works with any highlight export that lands in a folder or carries a tag. Read
 | All AI providers | Yes | Yes |
 | Cross-source themes | Yes | Yes |
 
-The free tier allows 3 total syncs. This is a one-time lifetime allowance, not a monthly reset. Generating the report from already-synced highlights is always free. Pro is a one-time license that removes the sync limit. A purchase link will be added here once the Pro product page is live.
+The free tier allows 3 total syncs. This is a one-time lifetime allowance, not a monthly reset. Generating the report from already-synced highlights is always free. Pro is a one-time license that removes the sync limit. Get it here: https://ibrh96.gumroad.com/l/vtqocc
 
 ## Privacy
 
