@@ -158,7 +158,8 @@ export default class HighlightInboxSynthesizerPlugin extends Plugin {
 
 			new Notice(
 				`Synced: ${result.extracted} extracted, ` +
-					`${result.skipped} skipped, ${result.failed} failed.`
+					`${result.skipped} skipped, ${result.failed} failed · ` +
+					`${result.themes} themes (${result.themesResynthesized} re-synthesized).`
 			);
 		} catch (error) {
 			console.error("Highlight Inbox Synthesizer: sync failed", error);

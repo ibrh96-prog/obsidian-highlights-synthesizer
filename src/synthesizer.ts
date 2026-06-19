@@ -77,6 +77,31 @@ const EXTRACTION_SYSTEM_PROMPT = [
 	"- Do NOT invent content that is not in the highlights.",
 ].join("\n");
 
+const THEME_SYSTEM_PROMPT = [
+	"You are a highlight-inbox synthesis engine. You are given several sources",
+	"that share a common theme — each with its title, summary, and key claims.",
+	"Identify what they collectively agree on and where they diverge.",
+	"",
+	"Return ONLY a valid JSON object — no markdown code fences, no commentary,",
+	"no prose before or after. The object must match exactly this shape:",
+	"{",
+	'  "consensus": string,',
+	'  "tension": string,',
+	'  "language": string',
+	"}",
+	"",
+	"Rules:",
+	'- "consensus" is 1-2 sentences: what these sources agree on.',
+	'- "tension" is 1-2 sentences: where they disagree or diverge. Most source',
+	'  pairs have NO real disagreement — strongly prefer an empty string "".',
+	"  Only report tension when there is a genuine, specific contradiction between",
+	"  sources; never manufacture one from differing emphasis or framing.",
+	'- Write "consensus" and "tension" in the dominant language of the sources.',
+	'- "language" is the ISO 639-1 code of that dominant language,',
+	'  e.g. "en", "tr", "de".',
+	"- Do NOT invent claims the sources do not make.",
+].join("\n");
+
 /**
  * Owns the synthesis cache and answers cross-source queries.
  *
@@ -88,8 +113,8 @@ const EXTRACTION_SYSTEM_PROMPT = [
  * for "today" — the caller passes dates in — so the engine stays deterministic
  * and testable.
  *
- * Phase 3 step 1: per-source extraction is live. Theme synthesis and report
- * rendering are still stubbed and arrive in steps 2 and 3.
+ * Phase 3 complete: per-source extraction, cross-source theme synthesis, and
+ * report rendering are all live.
  */
 export class SynthesisEngine {
 	private readonly llm: LLMAdapter;
@@ -123,8 +148,8 @@ export class SynthesisEngine {
 	 * needs (re-)extraction, with bodies prepared by the caller. The cache is
 	 * mutated in place; the caller persists it afterwards.
 	 *
-	 * Phase 2: extraction and synthesis are stubbed (no LLM calls yet), so this
-	 * only maintains cache bookkeeping. Phase 3 fills in the LLM passes.
+	 * One LLM call per (re-)extracted source, then per-theme synthesis — all
+	 * incremental, so unchanged sources and unchanged themes cost zero tokens.
 	 */
 	async syncSources(
 		allSources: HighlightSource[],
@@ -172,10 +197,8 @@ export class SynthesisEngine {
 	 * Synthesize each theme (topic shared by 2+ sources) via one LLM call,
 	 * incrementally. A theme is re-synthesized only when its member set or any
 	 * member's mtime changed (signature mismatch) — unchanged themes cost zero
-	 * tokens. Syntheses for topics that are no longer themes are pruned.
-	 *
-	 * Phase 2: the signature/skip mechanics are real; {@link synthesizeTheme} is
-	 * a stub, so no synthesis is ever stored yet.
+	 * tokens. Syntheses for topics that are no longer themes are pruned. A failed
+	 * synthesis is warned and skipped, leaving any prior entry untouched.
 	 */
 	private async syncThemes(
 		allSources: HighlightSource[]
@@ -243,9 +266,44 @@ export class SynthesisEngine {
 		);
 		lines.push("");
 
-		// TODO (Step 3): render the cross-source "## Themes" section here —
-		// consensus/tension paragraphs from this.cache.themeSyntheses, grouped by
-		// this.themesOf(sources). Step 2 deliberately renders per-source only.
+		// --- Themes (deterministic topic grouping; consensus/tension come from
+		// cached LLM synthesis — the report itself never calls the LLM). Rendered
+		// ABOVE Sources, mirroring the template. Omitted entirely when nothing is
+		// cross-cutting. ---
+		const themes = this.themesOf(sources);
+		if (themes.length > 0) {
+			lines.push("## Themes");
+			lines.push("");
+			for (const theme of themes) {
+				lines.push(`### ${theme.topic}`);
+				lines.push("");
+
+				const synthesis = this.cache.themeSyntheses[theme.topic]?.synthesis;
+				if (synthesis) {
+					lines.push(this.oneLine(synthesis.consensus));
+					lines.push("");
+					// Tension line only when present — omitted when there is none.
+					if (synthesis.tension) {
+						lines.push(`**Tension:** ${this.oneLine(synthesis.tension)}`);
+						lines.push("");
+					}
+				}
+
+				// Which sources support this theme.
+				for (const member of theme.members) {
+					const name = this.noteName(member.path);
+					const extraction =
+						this.cache.extractions[member.path]?.extraction;
+					const summary = extraction
+						? this.oneLine(extraction.summary)
+						: "";
+					lines.push(
+						summary ? `- [[${name}]] — ${summary}` : `- [[${name}]]`
+					);
+				}
+				lines.push("");
+			}
+		}
 
 		lines.push("## Sources");
 		lines.push("");
@@ -311,6 +369,15 @@ export class SynthesisEngine {
 	 * topics carried by 2+ distinct sources count as a theme. Ordered biggest
 	 * theme first, then alphabetically — fully deterministic. Shared by the
 	 * report and per-theme synthesis so both agree on what a theme is.
+	 *
+	 * Near-synonymous topics (e.g. "attention" and "productivity") can attach to
+	 * the exact same set of sources, which would otherwise yield two themes built
+	 * from identical inputs and near-identical synthesis. So after sorting, themes
+	 * with an identical member set are collapsed: the first (biggest-then-alpha)
+	 * is kept and the rest dropped. Because this runs before synthesis and
+	 * rendering alike, a dropped topic is never synthesized and never written to
+	 * cache.themeSyntheses — and any pre-existing entry for it is pruned by
+	 * syncThemes, which only keeps topics still returned here.
 	 */
 	private themesOf(
 		sources: HighlightSource[]
@@ -331,13 +398,30 @@ export class SynthesisEngine {
 			}
 		}
 
-		return [...groups.entries()]
+		const sorted = [...groups.entries()]
 			.filter(([, members]) => members.length >= 2)
 			.sort(
 				([topicA, a], [topicB, b]) =>
 					b.length - a.length || topicA.localeCompare(topicB)
 			)
 			.map(([topic, members]) => ({ topic, members }));
+
+		// Collapse themes that cover the exact same member set — keep the first
+		// (deterministic by the sort above), drop later duplicates.
+		const seenMemberSets = new Set<string>();
+		const deduped: Array<{ topic: string; members: HighlightSource[] }> = [];
+		for (const theme of sorted) {
+			const key = theme.members
+				.map((member) => member.path)
+				.sort()
+				.join("|");
+			if (seenMemberSets.has(key)) {
+				continue;
+			}
+			seenMemberSets.add(key);
+			deduped.push(theme);
+		}
+		return deduped;
 	}
 
 	/**
@@ -539,18 +623,124 @@ export class SynthesisEngine {
 	}
 
 	/**
-	 * Synthesize one theme from its members. Phase 2 stub — no LLM call yet,
-	 * always returns null. Phase 3 adds the synthesis prompt and parsing.
+	 * Ask the LLM to synthesize one theme from its members' summaries and key
+	 * claims (the cached extractions — never the raw highlights again). Same
+	 * defensive path as extraction: safe parse with first-{ to last-} recovery,
+	 * one retry, valid-but-empty detection, and warn-and-skip (returning null) on
+	 * a second failure or a thrown request — so one bad theme never aborts sync.
 	 */
 	private async synthesizeTheme(
 		topic: string,
 		members: HighlightSource[]
 	): Promise<ThemeSynthesis | null> {
-		// TODO (Phase 3): build the theme prompt, call this.llm.complete, and
-		// parse the response into a ThemeSynthesis.
-		void topic;
-		void members;
-		return null;
+		const userPrompt = this.buildThemePrompt(topic, members);
+
+		try {
+			const first = await this.llm.complete(THEME_SYSTEM_PROMPT, userPrompt);
+			const firstOutcome = this.parseTheme(first);
+			if (firstOutcome.kind === "ok") {
+				return firstOutcome.value;
+			}
+
+			const complaint =
+				firstOutcome.kind === "empty"
+					? "Your previous output was valid JSON but contained no consensus. " +
+						"Return the JSON object with a non-empty consensus."
+					: "Your previous output was not valid JSON. Return ONLY the JSON object.";
+			const retryPrompt = `${userPrompt}\n\n${complaint}`;
+			const second = await this.llm.complete(THEME_SYSTEM_PROMPT, retryPrompt);
+			const secondOutcome = this.parseTheme(second);
+			if (secondOutcome.kind === "ok") {
+				return secondOutcome.value;
+			}
+
+			// Response body text only — never API keys or headers.
+			const reason =
+				secondOutcome.kind === "empty"
+					? "valid JSON but empty synthesis"
+					: "invalid JSON";
+			console.warn(
+				`[Highlight Inbox Synthesizer] Theme synthesis failed (${reason}) for theme: ${topic}. ` +
+					`Raw response (first 300 chars): ${second.slice(0, 300)}`
+			);
+			return null;
+		} catch (error) {
+			console.warn(
+				`[Highlight Inbox Synthesizer] Theme synthesis request failed for theme: ${topic}`,
+				error
+			);
+			return null;
+		}
+	}
+
+	private buildThemePrompt(topic: string, members: HighlightSource[]): string {
+		const lines = [`Theme: ${topic}`, "", "Sources:"];
+		for (const member of members) {
+			const extraction = this.cache.extractions[member.path]?.extraction;
+			if (!extraction) {
+				continue;
+			}
+			lines.push("", `Title: ${member.title}`);
+			lines.push(`Summary: ${this.oneLine(extraction.summary)}`);
+			if (extraction.keyClaims.length > 0) {
+				lines.push(`Key claims: ${extraction.keyClaims.join(" ")}`);
+			}
+		}
+		return lines.join("\n");
+	}
+
+	private parseTheme(raw: string): ParseOutcome<ThemeSynthesis> {
+		const value = this.extractJsonValue(raw);
+		if (value === undefined) {
+			return { kind: "invalid-json" };
+		}
+		const synthesis = this.coerceTheme(value);
+		if (synthesis === null) {
+			return { kind: "empty" };
+		}
+		return { kind: "ok", value: synthesis };
+	}
+
+	/** Validate/normalize an arbitrary parsed value into a ThemeSynthesis. */
+	private coerceTheme(value: unknown): ThemeSynthesis | null {
+		if (typeof value !== "object" || value === null) {
+			return null;
+		}
+		const obj = value as Record<string, unknown>;
+
+		const consensus =
+			typeof obj["consensus"] === "string" ? obj["consensus"].trim() : "";
+		if (consensus === "") {
+			return null;
+		}
+
+		const synthesis: ThemeSynthesis = {
+			consensus,
+			tension:
+				typeof obj["tension"] === "string" ? obj["tension"].trim() : "",
+		};
+
+		const language =
+			typeof obj["language"] === "string"
+				? obj["language"].trim().toLowerCase()
+				: "";
+		const languageMatch = language.match(/^[a-z]{2}/);
+		if (languageMatch) {
+			synthesis.language = languageMatch[0];
+		}
+
+		return synthesis;
+	}
+
+	/** Vault path → wikilink-friendly note name (drop folders and .md). */
+	private noteName(sourcePath: string): string {
+		const base = sourcePath.split("/").pop() ?? sourcePath;
+		return base.replace(/\.md$/i, "");
+	}
+
+	/** Flatten multi-line text to a single line for list items / paragraphs. */
+	private oneLine(text: string): string {
+		return text.replace(/\s*\n\s*/g, " ").trim();
 	}
 
 	/** Small deterministic djb2 hash, rendered as base-36. */
