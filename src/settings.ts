@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type HighlightInboxSynthesizerPlugin from "./main";
+import { verifyLicense } from "./license";
 
 export type LLMProvider = "anthropic" | "openai-compatible";
 
@@ -141,9 +142,19 @@ export class HighlightInboxSettingTab extends PluginSettingTab {
 					});
 			});
 
-		// Verification arrives in a later phase; for now just report free usage.
-		new Setting(containerEl).setDesc(
-			`Free tier — 3 total syncs (${this.plugin.freeUsage.count}/3 used)`
-		);
+		const status = verifyLicense(this.plugin.settings.proLicenseKey);
+		if (status.valid) {
+			new Setting(containerEl)
+				.setName("✓ Pro active")
+				.setDesc(`Licensed to ${status.email}`);
+		} else if (this.plugin.settings.proLicenseKey) {
+			new Setting(containerEl)
+				.setName("License invalid")
+				.setDesc(status.reason ?? "Could not verify license key.");
+		} else {
+			new Setting(containerEl).setDesc(
+				`Free tier — 3 total syncs (${this.plugin.freeUsage.count}/3 used)`
+			);
+		}
 	}
 }

@@ -7,6 +7,7 @@ import {
 import { LLMAdapter, MAX_INPUT_CHARS } from "./llm";
 import { HighlightCollector } from "./collector";
 import { SynthesisEngine, type SourceInput } from "./synthesizer";
+import { verifyLicense } from "./license";
 import type { FreeUsage, HighlightSource, SynthesisCache } from "./types";
 
 function emptyCache(): SynthesisCache {
@@ -110,9 +111,10 @@ export default class HighlightInboxSynthesizerPlugin extends Plugin {
 	private async runSync(): Promise<void> {
 		// Pro gate. Lifetime free tier: 3 successful syncs, no monthly reset.
 		// Pro users are never counted or blocked. Bail before any LLM call.
-		// TODO (Phase 4): replace this with real Ed25519 license verification.
-		// For now, any non-empty proLicenseKey counts as Pro.
-		const isPro = this.settings.proLicenseKey.trim() !== "";
+		// Pro requires a license whose Ed25519 signature verifies AND whose
+		// product matches; an invalid or empty key falls through to the free tier
+		// (the plugin still works — it's just gated), never a hard block.
+		const isPro = verifyLicense(this.settings.proLicenseKey).valid;
 		if (!isPro && this.freeUsage.count >= 3) {
 			new Notice(
 				"Free limit reached: 3 total syncs. Upgrade to Pro for unlimited."
