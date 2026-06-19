@@ -214,22 +214,94 @@ export class SynthesisEngine {
 
 	/**
 	 * Render the synthesis report as a markdown document. Pure and free: reads
-	 * the in-memory cache and the collected sources — zero LLM calls — and
-	 * returns a string; writing it to the vault is the caller's job.
+	 * the in-memory cache and the collected sources — ZERO LLM calls — and returns
+	 * a string; writing it to the vault is the caller's job. `todayISO`
+	 * (YYYY-MM-DD) is the caller's clock — the engine never reads the clock.
 	 *
-	 * Phase 2: a placeholder document. Phase 3 fills in the real sections.
+	 * Step 2: per-source sections only, built from cached extractions. The
+	 * cross-source Themes section is added in Step 3.
 	 */
 	buildReportMarkdown(sources: HighlightSource[], todayISO: string): string {
-		// TODO (Phase 3): render the inbox, themes, and summary sections.
-		void sources;
+		const extractionOf = (source: HighlightSource) =>
+			this.cache.extractions[source.path]?.extraction;
+
+		// Only sources with a cached extraction are rendered; newest highlighted
+		// first, undated last. Pure string sort on the already-normalized
+		// YYYY-MM-DD date — the engine never parses or computes dates.
+		const synced = sources
+			.filter((source) => extractionOf(source) !== undefined)
+			.sort((a, b) =>
+				(b.highlightedDate ?? "").localeCompare(a.highlightedDate ?? "")
+			);
+
 		const lines: string[] = [];
-		lines.push("# Highlight Synthesis");
+
+		lines.push("# Highlight Inbox Synthesis");
 		lines.push("");
-		lines.push(`_Last synced: ${this.cache.lastSynced || "never"}_`);
-		lines.push(`_Generated: ${todayISO}_`);
+		lines.push(
+			`_${synced.length} ${synced.length === 1 ? "source" : "sources"} · generated ${todayISO}_`
+		);
 		lines.push("");
-		lines.push("_Report generation arrives in a later phase._");
+
+		// TODO (Step 3): render the cross-source "## Themes" section here —
+		// consensus/tension paragraphs from this.cache.themeSyntheses, grouped by
+		// this.themesOf(sources). Step 2 deliberately renders per-source only.
+
+		lines.push("## Sources");
+		lines.push("");
+
+		if (synced.length === 0) {
+			lines.push('_No extractions yet — run "Sync highlights" first._');
+			lines.push("");
+			return lines.join("\n");
+		}
+
+		for (const source of synced) {
+			const extraction = extractionOf(source);
+			if (!extraction) {
+				continue;
+			}
+
+			lines.push(`### ${source.title}`);
+			lines.push("");
+
+			const byline = this.byline(source);
+			if (byline !== "") {
+				lines.push(`_${byline}_`);
+				lines.push("");
+			}
+
+			lines.push(extraction.summary);
+			lines.push("");
+
+			if (extraction.keyClaims.length > 0) {
+				lines.push("**Key claims**");
+				lines.push("");
+				for (const claim of extraction.keyClaims) {
+					lines.push(`- ${claim}`);
+				}
+				lines.push("");
+			}
+
+			if (extraction.topics.length > 0) {
+				lines.push(`**Topics:** ${extraction.topics.join(", ")}`);
+				lines.push("");
+			}
+		}
+
 		return lines.join("\n");
+	}
+
+	/** Italic-ready byline from author/category, omitting absent parts. */
+	private byline(source: HighlightSource): string {
+		const parts: string[] = [];
+		if (source.author) {
+			parts.push(`by ${source.author}`);
+		}
+		if (source.category) {
+			parts.push(source.category);
+		}
+		return parts.join(" · ");
 	}
 
 	// --- Engine internals (all pure) ---

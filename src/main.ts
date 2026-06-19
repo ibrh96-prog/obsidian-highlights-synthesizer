@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, TFile } from "obsidian";
 import {
 	DEFAULT_SETTINGS,
 	HighlightInboxSettingTab,
@@ -212,12 +212,43 @@ export default class HighlightInboxSynthesizerPlugin extends Plugin {
 	}
 
 	/**
-	 * Render the report from the current cache and write it to the vault. Phase 2
-	 * stub — the real report writing arrives in Phase 3.
+	 * Render the report from the current cache and write it to a fixed vault
+	 * note, overwriting if it exists, then open it. ZERO LLM calls and never
+	 * gated — report generation is always free and never touches the free
+	 * counter. Collecting sources only reads vault metadata/bodies.
 	 */
 	private async runGenerateReport(): Promise<void> {
-		// TODO (Phase 3): build the report markdown and write it to the vault.
-		new Notice("Generate highlights report: coming soon.");
+		if (Object.keys(this.cache.extractions).length === 0) {
+			new Notice("Nothing to report — run Sync highlights first.");
+			return;
+		}
+
+		const path = "Highlight Inbox Synthesis.md";
+		try {
+			const sources = await this.collector.collect();
+			const markdown = this.engine.buildReportMarkdown(
+				sources,
+				this.todayISO()
+			);
+
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			let file: TFile;
+			if (existing instanceof TFile) {
+				await this.app.vault.modify(existing, markdown);
+				file = existing;
+			} else {
+				file = await this.app.vault.create(path, markdown);
+			}
+
+			await this.app.workspace.getLeaf(false).openFile(file);
+			new Notice("Report written to Highlight Inbox Synthesis.md");
+		} catch (error) {
+			console.error(
+				"Highlight Inbox Synthesizer: failed to write report",
+				error
+			);
+			new Notice("Failed to write report. See console.");
+		}
 	}
 
 	/**
