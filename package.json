@@ -1,6 +1,6 @@
 {
   "name": "highlight-inbox-synthesizer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Turn your scattered highlights into synthesized reading memory.",
   "main": "main.js",
   "scripts": {

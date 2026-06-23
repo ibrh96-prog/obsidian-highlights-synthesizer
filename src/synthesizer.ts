@@ -320,7 +320,12 @@ export class SynthesisEngine {
 				continue;
 			}
 
-			lines.push(`### ${source.title}`);
+			const alias = this.wikiAlias(source.title);
+			lines.push(
+				alias
+					? `### [[${this.noteName(source.path)}|${alias}]]`
+					: `### [[${this.noteName(source.path)}]]`
+			);
 			lines.push("");
 
 			const byline = this.byline(source);
@@ -736,6 +741,11 @@ export class SynthesisEngine {
 	private noteName(sourcePath: string): string {
 		const base = sourcePath.split("/").pop() ?? sourcePath;
 		return base.replace(/\.md$/i, "");
+	}
+
+	/** Sanitize a string for use as a wikilink alias (strip [, ], |). */
+	private wikiAlias(s: string): string {
+		return s.replace(/[\[\]|]/g, " ").replace(/\s+/g, " ").trim();
 	}
 
 	/** Flatten multi-line text to a single line for list items / paragraphs. */
