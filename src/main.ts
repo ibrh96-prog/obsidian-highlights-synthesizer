@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile } from "obsidian";
+import { Modal, Notice, Plugin, TFile } from "obsidian";
 import {
 	DEFAULT_SETTINGS,
 	HighlightInboxSettingTab,
@@ -9,6 +9,30 @@ import { HighlightCollector } from "./collector";
 import { SynthesisEngine, type SourceInput } from "./synthesizer";
 import { verifyLicense } from "./license";
 import type { FreeUsage, HighlightSource, SynthesisCache } from "./types";
+
+class ProUpgradeModal extends Modal {
+	onOpen(): void {
+		this.contentEl.createEl("h2", { text: "Free limit reached" });
+		this.contentEl.createEl("p", {
+			text: "You've used all 3 free syncs. Reports can still be generated from already-synced highlights — new syncs need a Pro license.",
+		});
+		const buttonRow = this.contentEl.createDiv();
+		buttonRow
+			.createEl("button", { text: "Get Pro license" })
+			.addEventListener("click", () => {
+				window.open("https://ibrh96.gumroad.com/l/vtqocc", "_blank");
+			});
+		buttonRow
+			.createEl("button", { text: "Got it" })
+			.addEventListener("click", () => {
+				this.close();
+			});
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
 
 function emptyCache(): SynthesisCache {
 	return { extractions: {}, themeSyntheses: {}, lastSynced: "" };
@@ -116,9 +140,7 @@ export default class HighlightInboxSynthesizerPlugin extends Plugin {
 		// (the plugin still works — it's just gated), never a hard block.
 		const isPro = verifyLicense(this.settings.proLicenseKey).valid;
 		if (!isPro && this.freeUsage.count >= 3) {
-			new Notice(
-				"Free limit reached: 3 total syncs. Upgrade to Pro for unlimited."
-			);
+			new ProUpgradeModal(this.app).open();
 			return;
 		}
 
