@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type HighlightInboxSynthesizerPlugin from "./main";
-import { verifyLicense } from "./license";
+import { verifyLicense, GUMROAD_URL } from "./license";
 
 export type LLMProvider = "anthropic" | "openai-compatible";
 
@@ -155,6 +155,19 @@ export class HighlightInboxSettingTab extends PluginSettingTab {
 			new Setting(containerEl).setDesc(
 				`Free tier — 3 total syncs (${this.plugin.freeUsage.count}/3 used)`
 			);
+		}
+
+		if (!status.valid) {
+			new Setting(containerEl)
+				.setName("Upgrade to Pro")
+				.setDesc("Unlimited syncs, one-time payment, no subscription.")
+				.addButton((button) => {
+					button
+						.setButtonText("Get Pro license")
+						.onClick(() => {
+							window.open(GUMROAD_URL, "_blank");
+						});
+				});
 		}
 	}
 }

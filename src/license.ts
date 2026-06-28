@@ -8,6 +8,7 @@ import nacl from "tweetnacl";
 
 const PUBLIC_KEY_B64 = "baL5i2Qkx2cNfzBSkZPQ5szPJ/UTOuxa/Q112ZUzdHQ=";
 const PRODUCT_ID = "highlight-inbox-synthesizer";
+export const GUMROAD_URL = "https://ibrh96.gumroad.com/l/vtqocc";
 
 interface LicensePayload {
 	product: string;

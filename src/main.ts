@@ -7,7 +7,7 @@ import {
 import { LLMAdapter, MAX_INPUT_CHARS } from "./llm";
 import { HighlightCollector } from "./collector";
 import { SynthesisEngine, type SourceInput } from "./synthesizer";
-import { verifyLicense } from "./license";
+import { verifyLicense, GUMROAD_URL } from "./license";
 import type { FreeUsage, HighlightSource, SynthesisCache } from "./types";
 
 class ProUpgradeModal extends Modal {
@@ -20,7 +20,7 @@ class ProUpgradeModal extends Modal {
 		buttonRow
 			.createEl("button", { text: "Get Pro license" })
 			.addEventListener("click", () => {
-				window.open("https://ibrh96.gumroad.com/l/vtqocc", "_blank");
+				window.open(GUMROAD_URL, "_blank");
 			});
 		buttonRow
 			.createEl("button", { text: "Got it" })
